@@ -342,7 +342,7 @@ static void announce(void)
 #endif
       "========================================\n
       | Minix 3.4.0rc6 - SO - UNIFESP 1s2025 |\n
-      | Projeto Pratico (I) - Equipe 4 |\n
+      |    Projeto Pratico (I) - Equipe 4    |\n
       ========================================\n",
       OS_RELEASE);
   printf("MINIX is open source software, see http://www.minix3.org\n");
@@ -362,7 +362,7 @@ void prepare_shutdown(const int how)
    */
   printf("=======================================\n
         | ATE A PROXIMA - SO - UNIFESP 1s2025 |\n
-        | Projeto Pratico (I) - Equipe 4 |\n
+        |    Projeto Pratico (I) - Equipe 4   |\n
         =======================================\n");
   set_kernel_timer(&shutdown_timer, get_monotonic() + system_hz,
       minix_shutdown, how);
