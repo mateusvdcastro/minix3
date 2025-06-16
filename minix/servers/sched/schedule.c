@@ -13,9 +13,16 @@
 #include <minix/com.h>
 #include <machine/archtypes.h>
 
+#define ALPHA 0.5 /* Smoothing factor for exponential averaging of burst times */
+
 static unsigned balance_timeout;
 
 #define BALANCE_TIMEOUT	5 /* how often to balance queues in seconds */
+
+/* SJF Scheduler Functions */
+static int pick_sjf(void);
+static void update_burst_estimate(struct schedproc *rmp, unsigned long actual_burst);
+static unsigned long get_remaining_burst(struct schedproc *rmp);
 
 static int schedule_process(struct schedproc * rmp, unsigned flags);
 
@@ -96,13 +103,47 @@ int do_noquantum(message *m_ptr)
 	}
 
 	rmp = &schedproc[proc_nr_n];
-	if (rmp->priority < MIN_USER_Q) {
-		rmp->priority += 1; /* lower priority */
+	
+	/* Update consumed time for SJF - assume the process used its full quantum */
+	if (rmp->flags & IN_USE) {
+		rmp->consumed_time += rmp->time_slice;
 	}
 
-	if ((rv = schedule_process_local(rmp)) != OK) {
-		return rv;
+	/* For system processes, use the original priority-based logic */
+	if (rmp->priority < MIN_USER_Q) {
+		rmp->priority += 1; /* lower priority */
+		if ((rv = schedule_process_local(rmp)) != OK) {
+			return rv;
+		}
+		return OK;
 	}
+
+	/* For user processes, use SJF scheduling */
+	int next_proc_nr = pick_sjf();
+	
+	if (next_proc_nr >= 0 && (schedproc[next_proc_nr].flags & IN_USE)) {
+		struct schedproc *next_rmp = &schedproc[next_proc_nr];
+		
+		/* If the current process is still the shortest, continue with it */
+		if (next_proc_nr == proc_nr_n) {
+			if ((rv = schedule_process_local(rmp)) != OK) {
+				return rv;
+			}
+		} else {
+			/* Schedule the next shortest process */
+			if ((rv = schedule_process_local(next_rmp)) != OK) {
+				return rv;
+			}
+		}
+	} else {
+		/* No suitable process found, continue with current if available */
+		if (rmp->flags & IN_USE) {
+			if ((rv = schedule_process_local(rmp)) != OK) {
+				return rv;
+			}
+		}
+	}
+	
 	return OK;
 }
 
@@ -126,8 +167,17 @@ int do_stop_scheduling(message *m_ptr)
 	}
 
 	rmp = &schedproc[proc_nr_n];
+	
+	/* Update burst estimate for SJF if this was a user process */
+	if ((rmp->flags & IN_USE) && rmp->priority >= MIN_USER_Q && rmp->consumed_time > 0) {
+		update_burst_estimate(rmp, rmp->consumed_time);
+		rmp->consumed_time = 0; /* Reset for next burst */
+	}
+	
 #ifdef CONFIG_SMP
-	cpu_proc[rmp->cpu]--;
+	if (rmp->flags & IN_USE) {
+		cpu_proc[rmp->cpu]--;
+	}
 #endif
 	rmp->flags = 0; /*&= ~IN_USE;*/
 
@@ -164,6 +214,10 @@ int do_start_scheduling(message *m_ptr)
 	if (rmp->max_priority >= NR_SCHED_QUEUES) {
 		return EINVAL;
 	}
+	
+	/* Initialize SJF fields */
+	rmp->estimated_burst = DEFAULT_USER_TIME_SLICE; /* Initial estimate */
+	rmp->consumed_time = 0;                         /* No time consumed yet */
 
 	/* Inherit current priority and time slice from parent. Since there
 	 * is currently only one scheduler scheduling the whole system, this
@@ -366,4 +420,47 @@ void balance_queues(void)
 
 	if ((r = sys_setalarm(balance_timeout, 0)) != OK)
 		panic("sys_setalarm failed: %d", r);
+}
+
+/*===========================================================================*
+ *				SJF Scheduler Functions			     *
+ *===========================================================================*/
+
+/*
+ * pick_sjf: Select the process with the shortest remaining burst time
+ */
+static int pick_sjf(void) {
+    int best = -1;
+    unsigned long best_remain = ULONG_MAX;
+    
+    for (int i = 0; i < NR_PROCS; i++) {
+        if (!(schedproc[i].flags & IN_USE)) continue;
+        if (schedproc[i].priority < MIN_USER_Q) continue; /* Skip system processes */
+        
+        unsigned long remain = get_remaining_burst(&schedproc[i]);
+        if (remain < best_remain) {
+            best_remain = remain;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/*
+ * update_burst_estimate: Update the estimated burst time using exponential averaging
+ */
+static void update_burst_estimate(struct schedproc *rmp, unsigned long actual_burst) {
+    if (actual_burst > 0) {
+        rmp->estimated_burst = (unsigned long)(ALPHA * actual_burst + (1.0 - ALPHA) * rmp->estimated_burst);
+    }
+}
+
+/*
+ * get_remaining_burst: Calculate the remaining burst time for a process
+ */
+static unsigned long get_remaining_burst(struct schedproc *rmp) {
+    if (rmp->consumed_time >= rmp->estimated_burst) {
+        return 1; /* Always return at least 1 to avoid starvation */
+    }
+    return rmp->estimated_burst - rmp->consumed_time;
 }
