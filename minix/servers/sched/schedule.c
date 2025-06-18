@@ -13,6 +13,8 @@
 #include <minix/com.h>
 #include <machine/archtypes.h>
 
+FILE* log_file;
+
 #define ALPHA 0.5 /* Smoothing factor for exponential averaging of burst times */
 
 static unsigned balance_timeout;
@@ -107,6 +109,10 @@ int do_noquantum(message *m_ptr)
 	/* Update consumed time for SJF - assume the process used its full quantum */
 	if (rmp->flags & IN_USE) {
 		rmp->consumed_time += rmp->time_slice;
+
+		fprintf(log_file, "PID %d: quantum consumed, total consumed time: %lu\n",
+		  rmp->endpoint, rmp->consumed_time);
+		fflush(log_file);
 	}
 
 	/* For system processes, use the original priority-based logic */
@@ -389,6 +395,15 @@ void init_scheduling(void)
 {
 	int r;
 
+	log_file = fopen("/mnt/sjf_logs.txt", "w+");
+
+	if (!log_file){
+		printf("SJF: Failed to open log file.\n");
+	}
+
+	fprintf(log_file, "SJF Scheduler Initialized.\n");
+	fflush(log_file);	
+
 	balance_timeout = BALANCE_TIMEOUT * sys_hz();
 
 	if ((r = sys_setalarm(balance_timeout, 0)) != OK)
@@ -438,11 +453,17 @@ static int pick_sjf(void) {
         if (schedproc[i].priority < MIN_USER_Q) continue; /* Skip system processes */
         
         unsigned long remain = get_remaining_burst(&schedproc[i]);
+
+		fprintf(log_file, "PID %d: Remaining burst time: %lu\n", schedproc[i].endpoint, remain);
+
         if (remain < best_remain) {
             best_remain = remain;
             best = i;
         }
     }
+
+	fprintf(log_file, "SJF: Selected PID %d with remaining burst time %lu\n",
+		   best >= 0 ? schedproc[best].endpoint : -1, best_remain);
     return best;
 }
 
@@ -450,9 +471,22 @@ static int pick_sjf(void) {
  * update_burst_estimate: Update the estimated burst time using exponential averaging
  */
 static void update_burst_estimate(struct schedproc *rmp, unsigned long actual_burst) {
+	if (actual_burst == 0) {
+		fprintf(log_file, "PID %d: No burst time to update estimate.\n", rmp->endpoint);
+		return; /* No update needed if no burst occurred */
+	}
+
     if (actual_burst > 0) {
-        rmp->estimated_burst = (unsigned long)(ALPHA * actual_burst + (1.0 - ALPHA) * rmp->estimated_burst);
+		double previous_estimate = rmp->estimated_burst;
+		double new_estimate = ALPHA * actual_burst + (1.0 - ALPHA) * previous_estimate;
+		
+        rmp->estimated_burst = (unsigned long) new_estimate;
     }
+
+	fprintf(log_file,"PID %d: Updating burst estimate: "
+		 "Old: %lu, New: %lu, Actual: %lu\n",
+		 rmp->endpoint, previous_estimate, actual_burst, rmp->estimated_burst);
+	fflush(log_file);
 }
 
 /*
