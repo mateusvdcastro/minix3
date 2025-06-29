@@ -1,5 +1,7 @@
 /* This file contains the scheduling policy for SCHED
  *
+ * MODIFICADO PARA ROUND ROBIN - Projeto SO UNIFESP
+ * 
  * The entry points are:
  *   do_noquantum:        Called on behalf of process' that run out of quantum
  *   do_start_scheduling  Request to start scheduling a proc
@@ -16,6 +18,17 @@
 static unsigned balance_timeout;
 
 #define BALANCE_TIMEOUT	5 /* how often to balance queues in seconds */
+
+/* ROUND ROBIN CONFIGURATION */
+#define SCHEDULING_ALGORITHM_DEFAULT 0
+#define SCHEDULING_ALGORITHM_RR      1
+
+/* Configurável: algoritmo de escalonamento ativo */
+static int current_scheduling_algorithm = SCHEDULING_ALGORITHM_RR; /* 0=Padrão, 1=Round Robin */
+
+/* Round Robin specific configurations */
+#define RR_QUANTUM          100    /* Quantum do Round Robin em ticks (ajustável) */
+#define RR_USER_PRIORITY    USER_Q /* Prioridade fixa para Round Robin */
 
 static int schedule_process(struct schedproc * rmp, unsigned flags);
 
@@ -44,6 +57,20 @@ static int schedule_process(struct schedproc * rmp, unsigned flags);
 #define is_system_proc(p)	((p)->parent == RS_PROC_NR)
 
 static unsigned cpu_proc[CONFIG_MAX_CPUS];
+
+/* ROUND ROBIN: Função para alternar algoritmo de escalonamento */
+void set_scheduling_algorithm(int algorithm) {
+	if (algorithm == SCHEDULING_ALGORITHM_DEFAULT || 
+	    algorithm == SCHEDULING_ALGORITHM_RR) {
+		current_scheduling_algorithm = algorithm;
+		printf("SCHED: Algoritmo alterado para %s\n", 
+		       algorithm == SCHEDULING_ALGORITHM_RR ? "Round Robin" : "Padrão");
+	}
+}
+
+int get_scheduling_algorithm(void) {
+	return current_scheduling_algorithm;
+}
 
 static void pick_cpu(struct schedproc * proc)
 {
@@ -96,8 +123,20 @@ int do_noquantum(message *m_ptr)
 	}
 
 	rmp = &schedproc[proc_nr_n];
-	if (rmp->priority < MIN_USER_Q) {
-		rmp->priority += 1; /* lower priority */
+	
+	/* ROUND ROBIN: Decisão baseada no algoritmo ativo */
+	if (current_scheduling_algorithm == SCHEDULING_ALGORITHM_RR) {
+		/* Round Robin: Não muda prioridade, apenas reescalona com novo quantum */
+		if (rmp->priority >= USER_Q && rmp->priority <= MIN_USER_Q) {
+			/* Processo de usuário: mantém prioridade fixa */
+			rmp->priority = RR_USER_PRIORITY;
+			rmp->time_slice = RR_QUANTUM;
+		}
+	} else {
+		/* Algoritmo padrão: diminui prioridade */
+		if (rmp->priority < MIN_USER_Q) {
+			rmp->priority += 1; /* lower priority */
+		}
 	}
 
 	if ((rv = schedule_process_local(rmp)) != OK) {
@@ -171,8 +210,15 @@ int do_start_scheduling(message *m_ptr)
 	if (rmp->endpoint == rmp->parent) {
 		/* We have a special case here for init, which is the first
 		   process scheduled, and the parent of itself. */
-		rmp->priority   = USER_Q;
-		rmp->time_slice = DEFAULT_USER_TIME_SLICE;
+		   
+		/* ROUND ROBIN: Configuração inicial baseada no algoritmo */
+		if (current_scheduling_algorithm == SCHEDULING_ALGORITHM_RR) {
+			rmp->priority   = RR_USER_PRIORITY;
+			rmp->time_slice = RR_QUANTUM;
+		} else {
+			rmp->priority   = USER_Q;
+			rmp->time_slice = DEFAULT_USER_TIME_SLICE;
+		}
 
 		/*
 		 * Since kernel never changes the cpu of a process, all are
@@ -204,8 +250,17 @@ int do_start_scheduling(message *m_ptr)
 				&parent_nr_n)) != OK)
 			return rv;
 
-		rmp->priority = schedproc[parent_nr_n].priority;
-		rmp->time_slice = schedproc[parent_nr_n].time_slice;
+		/* ROUND ROBIN: Configuração baseada no algoritmo ativo */
+		if (current_scheduling_algorithm == SCHEDULING_ALGORITHM_RR && 
+		    schedproc[parent_nr_n].priority >= USER_Q) {
+			/* Para Round Robin, processos de usuário têm prioridade e quantum fixos */
+			rmp->priority = RR_USER_PRIORITY;
+			rmp->time_slice = RR_QUANTUM;
+		} else {
+			/* Comportamento padrão */
+			rmp->priority = schedproc[parent_nr_n].priority;
+			rmp->time_slice = schedproc[parent_nr_n].time_slice;
+		}
 		break;
 		
 	default: 
@@ -278,6 +333,14 @@ int do_nice(message *m_ptr)
 	old_q     = rmp->priority;
 	old_max_q = rmp->max_priority;
 
+	/* ROUND ROBIN: Ignore nice changes for user processes in RR mode */
+	if (current_scheduling_algorithm == SCHEDULING_ALGORITHM_RR && 
+	    rmp->priority >= USER_Q) {
+		printf("SCHED: Nice ignored in Round Robin mode for process %d\n", 
+		       rmp->endpoint);
+		return OK;
+	}
+
 	/* Update the proc entry and reschedule the process */
 	rmp->max_priority = rmp->priority = new_q;
 
@@ -318,6 +381,13 @@ static int schedule_process(struct schedproc * rmp, unsigned flags)
 
 	niced = (rmp->max_priority > USER_Q);
 
+	/* ROUND ROBIN: Log para debug */
+	if (current_scheduling_algorithm == SCHEDULING_ALGORITHM_RR && 
+	    rmp->priority >= USER_Q) {
+		printf("SCHED RR: Scheduling proc %d with prio %d, quantum %d\n",
+		       rmp->endpoint, new_prio, new_quantum);
+	}
+
 	if ((err = sys_schedule(rmp->endpoint, new_prio,
 		new_quantum, new_cpu, niced)) != OK) {
 		printf("PM: An error occurred when trying to schedule %d: %d\n",
@@ -339,6 +409,11 @@ void init_scheduling(void)
 
 	if ((r = sys_setalarm(balance_timeout, 0)) != OK)
 		panic("sys_setalarm failed: %d", r);
+		
+	/* ROUND ROBIN: Log inicial */
+	printf("SCHED: Iniciado com algoritmo %s (Quantum RR: %d ticks)\n",
+	       current_scheduling_algorithm == SCHEDULING_ALGORITHM_RR ? 
+	       "Round Robin" : "Padrão", RR_QUANTUM);
 }
 
 /*===========================================================================*
@@ -349,12 +424,23 @@ void init_scheduling(void)
  * scheduler bumps processes down one priority when ever they run out of
  * quantum. This function will find all proccesses that have been bumped down,
  * and pulls them back up. This default policy will soon be changed.
+ * 
+ * ROUND ROBIN: Modificado para não rebalancear em modo Round Robin
  */
 void balance_queues(void)
 {
 	struct schedproc *rmp;
 	int r, proc_nr;
 
+	/* ROUND ROBIN: Pula rebalanceamento se estiver em modo Round Robin */
+	if (current_scheduling_algorithm == SCHEDULING_ALGORITHM_RR) {
+		/* Em Round Robin, não precisamos rebalancear - todos ficam na mesma prioridade */
+		if ((r = sys_setalarm(balance_timeout, 0)) != OK)
+			panic("sys_setalarm failed: %d", r);
+		return;
+	}
+
+	/* Algoritmo padrão: rebalanceamento normal */
 	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
 		if (rmp->flags & IN_USE) {
 			if (rmp->priority > rmp->max_priority) {
