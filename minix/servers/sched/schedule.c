@@ -12,6 +12,9 @@
 #include <assert.h>
 #include <minix/com.h>
 #include <machine/archtypes.h>
+#include <minix/bitmap.h>
+#include <minix/sysutil.h>
+#include <stdlib.h>
 
 static unsigned balance_timeout;
 
@@ -42,6 +45,11 @@ static int schedule_process(struct schedproc * rmp, unsigned flags);
 
 /* processes created by RS are sysytem processes */
 #define is_system_proc(p)	((p)->parent == RS_PROC_NR)
+
+#define MAX_READY_PROCS NR_PROCS
+static int ready_queue[MAX_READY_PROCS];
+static int ready_front = 0;
+static int ready_back = 0;
 
 static unsigned cpu_proc[CONFIG_MAX_CPUS];
 
@@ -81,29 +89,54 @@ static void pick_cpu(struct schedproc * proc)
 }
 
 /*===========================================================================*
+ *				enqueue					     *
+ *===========================================================================*/
+
+void enqueue(int proc_nr) {
+    ready_queue[ready_back++] = proc_nr;
+}
+
+/*===========================================================================*
+ *				dequeue					     * << Added function to dequeue a process from the ready queue
+ *===========================================================================*/
+
+int dequeue(void) {
+    if (ready_front == ready_back) return -1;
+    return ready_queue[ready_front++];
+}
+
+/*===========================================================================*
+ *				peek_queue				     * << Added function to peek at the front of the ready queue
+ *===========================================================================*/
+
+int peek_queue(void) {
+    if (ready_front == ready_back) return -1;
+    return ready_queue[ready_front];
+}
+
+/*===========================================================================*
+ *				is_queue_empty				     * << Added function to check if the ready queue is empty
+ *===========================================================================*/
+
+int is_queue_empty(void) {
+    return ready_front == ready_back;
+}
+
+/*===========================================================================*
  *				do_noquantum				     *
  *===========================================================================*/
 
 int do_noquantum(message *m_ptr)
 {
-	register struct schedproc *rmp;
-	int rv, proc_nr_n;
+	int finished_proc = dequeue(); // Remove processo da frente
+	int next_proc = peek_queue();  // Pega o próximo (sem remover)
 
-	if (sched_isokendpt(m_ptr->m_source, &proc_nr_n) != OK) {
-		printf("SCHED: WARNING: got an invalid endpoint in OOQ msg %u.\n",
-		m_ptr->m_source);
-		return EBADEPT;
+	if (next_proc == -1) {
+		// Nenhum processo para agendar
+		return OK;
 	}
 
-	rmp = &schedproc[proc_nr_n];
-	if (rmp->priority < MIN_USER_Q) {
-		rmp->priority += 1; /* lower priority */
-	}
-
-	if ((rv = schedule_process_local(rmp)) != OK) {
-		return rv;
-	}
-	return OK;
+	return schedule_process(&schedproc[next_proc], SCHEDULE_CHANGE_ALL);
 }
 
 /*===========================================================================*
@@ -143,11 +176,11 @@ int do_start_scheduling(message *m_ptr)
 	int rv, proc_nr_n, parent_nr_n;
 	
 	/* we can handle two kinds of messages here */
-	assert(m_ptr->m_type == SCHEDULING_START || 
+	assert(m_ptr->m_type == SCHEDULING_START || // Asserts only valid calls pass by
 		m_ptr->m_type == SCHEDULING_INHERIT);
 
 	/* check who can send you requests */
-	if (!accept_message(m_ptr))
+	if (!accept_message(m_ptr)) // Verifies if the message is from a valid source
 		return EPERM;
 
 	/* Resolve endpoint to proc slot. */
@@ -160,58 +193,9 @@ int do_start_scheduling(message *m_ptr)
 	/* Populate process slot */
 	rmp->endpoint     = m_ptr->m_lsys_sched_scheduling_start.endpoint;
 	rmp->parent       = m_ptr->m_lsys_sched_scheduling_start.parent;
-	rmp->max_priority = m_ptr->m_lsys_sched_scheduling_start.maxprio;
-	if (rmp->max_priority >= NR_SCHED_QUEUES) {
-		return EINVAL;
-	}
-
-	/* Inherit current priority and time slice from parent. Since there
-	 * is currently only one scheduler scheduling the whole system, this
-	 * value is local and we assert that the parent endpoint is valid */
-	if (rmp->endpoint == rmp->parent) {
-		/* We have a special case here for init, which is the first
-		   process scheduled, and the parent of itself. */
-		rmp->priority   = USER_Q;
-		rmp->time_slice = DEFAULT_USER_TIME_SLICE;
-
-		/*
-		 * Since kernel never changes the cpu of a process, all are
-		 * started on the BSP and the userspace scheduling hasn't
-		 * changed that yet either, we can be sure that BSP is the
-		 * processor where the processes run now.
-		 */
-#ifdef CONFIG_SMP
-		rmp->cpu = machine.bsp_id;
-		/* FIXME set the cpu mask */
-#endif
-	}
 	
-	switch (m_ptr->m_type) {
-
-	case SCHEDULING_START:
-		/* We have a special case here for system processes, for which
-		 * quanum and priority are set explicitly rather than inherited 
-		 * from the parent */
-		rmp->priority   = rmp->max_priority;
-		rmp->time_slice = m_ptr->m_lsys_sched_scheduling_start.quantum;
-		break;
-		
-	case SCHEDULING_INHERIT:
-		/* Inherit current priority and time slice from parent. Since there
-		 * is currently only one scheduler scheduling the whole system, this
-		 * value is local and we assert that the parent endpoint is valid */
-		if ((rv = sched_isokendpt(m_ptr->m_lsys_sched_scheduling_start.parent,
-				&parent_nr_n)) != OK)
-			return rv;
-
-		rmp->priority = schedproc[parent_nr_n].priority;
-		rmp->time_slice = schedproc[parent_nr_n].time_slice;
-		break;
-		
-	default: 
-		/* not reachable */
-		assert(0);
-	}
+	// Removed priority and time_slice from the message,
+	// FCFS does not use them.
 
 	/* Take over scheduling the process. The kernel reply message populates
 	 * the processes current priority and its time slice */
@@ -222,12 +206,15 @@ int do_start_scheduling(message *m_ptr)
 	}
 	rmp->flags = IN_USE;
 
-	/* Schedule the process, giving it some quantum */
-	pick_cpu(rmp);
-	while ((rv = schedule_process(rmp, SCHEDULE_CHANGE_ALL)) == EBADCPU) {
-		/* don't try this CPU ever again */
-		cpu_proc[rmp->cpu] = CPU_DEAD;
-		pick_cpu(rmp);
+	enqueue(proc_nr_n); // Add the process to the ready queue
+
+	/* Schedule the process */
+	if (peek_queue() == proc_nr_n) {
+		if ((rv = schedule_process(rmp, SCHEDULE_CHANGE_ALL)) != OK) {
+			printf("Sched: Error while scheduling process %d, kernel replied %d\n",
+				rmp->endpoint, rv);
+			return rv;
+		}
 	}
 
 	if (rv != OK) {
