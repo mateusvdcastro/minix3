@@ -93,7 +93,14 @@ static void pick_cpu(struct schedproc * proc)
  *===========================================================================*/
 
 void enqueue(int proc_nr) {
-    ready_queue[ready_back++] = proc_nr;
+    // Verifica se a fila está cheia. Se o próximo 'back' for igual ao 'front',
+    // a fila está cheia.
+    if ((ready_back + 1) % MAX_READY_PROCS == ready_front) {
+        printf("SCHED: WARNING: Fila de prontos está cheia! Processo %d não pode ser enfileirado.\n", proc_nr);
+        return;
+    }
+    ready_queue[ready_back] = proc_nr;
+    ready_back = (ready_back + 1) % MAX_READY_PROCS;
 }
 
 /*===========================================================================*
@@ -101,8 +108,13 @@ void enqueue(int proc_nr) {
  *===========================================================================*/
 
 int dequeue(void) {
-    if (ready_front == ready_back) return -1;
-    return ready_queue[ready_front++];
+    // Se front == back, a fila está vazia.
+    if (ready_front == ready_back) {
+        return -1; 
+    }
+    int proc_nr = ready_queue[ready_front];
+    ready_front = (ready_front + 1) % MAX_READY_PROCS;
+    return proc_nr;
 }
 
 /*===========================================================================*
@@ -110,7 +122,9 @@ int dequeue(void) {
  *===========================================================================*/
 
 int peek_queue(void) {
-    if (ready_front == ready_back) return -1;
+    if (ready_front == ready_back) {
+        return -1;
+    }
     return ready_queue[ready_front];
 }
 
@@ -126,9 +140,8 @@ int is_queue_empty(void) {
  *				do_noquantum				     *
  *===========================================================================*/
 
-int do_noquantum(message *m_ptr)
+int do_schedule_next(message *m_ptr)
 {
-	int finished_proc = dequeue(); // Remove processo da frente
 	int next_proc = peek_queue();  // Pega o próximo (sem remover)
 
 	if (next_proc == -1) {
@@ -136,6 +149,7 @@ int do_noquantum(message *m_ptr)
 		return OK;
 	}
 
+	// Agenda o próximo processo
 	return schedule_process(&schedproc[next_proc], SCHEDULE_CHANGE_ALL);
 }
 
@@ -145,7 +159,7 @@ int do_noquantum(message *m_ptr)
 int do_stop_scheduling(message *m_ptr)
 {
 	register struct schedproc *rmp;
-	int proc_nr_n;
+	int proc_nr_n, current_proc;
 
 	/* check who can send you requests */
 	if (!accept_message(m_ptr))
@@ -158,39 +172,22 @@ int do_stop_scheduling(message *m_ptr)
 		return EBADEPT;
 	}
 
-	rmp = &schedproc[proc_nr];
+	rmp = &schedproc[proc_nr_n];
 
-	// Marca como fora de uso
+	// Marca processo como fora de uso
 	rmp->flags = 0;
 
-	// Remove da fila, se ele estiver nela
-	remove_from_fcfs_queue(proc_nr);
+    // O processo que está parando DEVE ser o que estava na frente da fila.
+    // Vamos verificar isso e removê-lo.
+    current_proc = dequeue();
 
-	// Agenda o próximo processo
-	int next = peek_queue();
-	if (next != -1) {
-		return schedule_process(&schedproc[next], SCHEDULE_CHANGE_ALL);
-	}
+    if (current_proc != proc_nr_n && current_proc != -1) {
+        // Isso indica um erro de estado grave no escalonador.
+        printf("SCHED: WARNING: Processo %d parou, mas o processo %d estava na frente da fila!\n", 
+                proc_nr_n, current_proc);
+    }
 
-	return OK;
-}
-
-/*===========================================================================*
- *				remove_from_fcfs_queue			     *
- *===========================================================================*/
-
-void remove_from_fcfs_queue(int proc_nr)
-{
-	int i;
-	for (i = ready_front; i < ready_back; ++i) {
-		if (ready_queue[i] == proc_nr) {
-			// Desloca todos os próximos
-			for (int j = i; j < ready_back - 1; ++j)
-				ready_queue[j] = ready_queue[j + 1];
-			ready_back--;
-			break;
-		}
-	}
+	return do_schedule_next();
 }
 
 /*===========================================================================*
@@ -262,77 +259,24 @@ int do_start_scheduling(message *m_ptr)
 }
 
 /*===========================================================================*
- *				do_nice					     *
- *===========================================================================*/
-int do_nice(message *m_ptr)
-{
-	struct schedproc *rmp;
-	int rv;
-	int proc_nr_n;
-	unsigned new_q, old_q, old_max_q;
-
-	/* check who can send you requests */
-	if (!accept_message(m_ptr))
-		return EPERM;
-
-	if (sched_isokendpt(m_ptr->m_pm_sched_scheduling_set_nice.endpoint, &proc_nr_n) != OK) {
-		printf("SCHED: WARNING: got an invalid endpoint in OoQ msg "
-		"%d\n", m_ptr->m_pm_sched_scheduling_set_nice.endpoint);
-		return EBADEPT;
-	}
-
-	rmp = &schedproc[proc_nr_n];
-	new_q = m_ptr->m_pm_sched_scheduling_set_nice.maxprio;
-	if (new_q >= NR_SCHED_QUEUES) {
-		return EINVAL;
-	}
-
-	/* Store old values, in case we need to roll back the changes */
-	old_q     = rmp->priority;
-	old_max_q = rmp->max_priority;
-
-	/* Update the proc entry and reschedule the process */
-	rmp->max_priority = rmp->priority = new_q;
-
-	if ((rv = schedule_process_local(rmp)) != OK) {
-		/* Something went wrong when rescheduling the process, roll
-		 * back the changes to proc struct */
-		rmp->priority     = old_q;
-		rmp->max_priority = old_max_q;
-	}
-
-	return rv;
-}
-
-/*===========================================================================*
  *				schedule_process			     *
  *===========================================================================*/
 static int schedule_process(struct schedproc * rmp, unsigned flags)
 {
 	int err;
-	int new_prio, new_quantum, new_cpu, niced;
+	int new_quantum, new_cpu;
 
 	pick_cpu(rmp);
 
-	if (flags & SCHEDULE_CHANGE_PRIO)
-		new_prio = rmp->priority;
-	else
-		new_prio = -1;
-
-	if (flags & SCHEDULE_CHANGE_QUANTUM)
-		new_quantum = rmp->time_slice;
-	else
-		new_quantum = -1;
+	new_quantum = -1; // Quantum padrão (infinito) para o algoritmo FCFS
 
 	if (flags & SCHEDULE_CHANGE_CPU)
 		new_cpu = rmp->cpu;
 	else
 		new_cpu = -1;
 
-	niced = (rmp->max_priority > USER_Q);
-
-	if ((err = sys_schedule(rmp->endpoint, new_prio,
-		new_quantum, new_cpu, niced)) != OK) {
+	if ((err = sys_schedule(rmp->endpoint, 0,
+		new_quantum, new_cpu, 0)) != OK) {
 		printf("PM: An error occurred when trying to schedule %d: %d\n",
 		rmp->endpoint, err);
 	}
@@ -349,33 +293,6 @@ void init_scheduling(void)
 	int r;
 
 	balance_timeout = BALANCE_TIMEOUT * sys_hz();
-
-	if ((r = sys_setalarm(balance_timeout, 0)) != OK)
-		panic("sys_setalarm failed: %d", r);
-}
-
-/*===========================================================================*
- *				balance_queues				     *
- *===========================================================================*/
-
-/* This function in called every N ticks to rebalance the queues. The current
- * scheduler bumps processes down one priority when ever they run out of
- * quantum. This function will find all proccesses that have been bumped down,
- * and pulls them back up. This default policy will soon be changed.
- */
-void balance_queues(void)
-{
-	struct schedproc *rmp;
-	int r, proc_nr;
-
-	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
-		if (rmp->flags & IN_USE) {
-			if (rmp->priority > rmp->max_priority) {
-				rmp->priority -= 1; /* increase priority */
-				schedule_process_local(rmp);
-			}
-		}
-	}
 
 	if ((r = sys_setalarm(balance_timeout, 0)) != OK)
 		panic("sys_setalarm failed: %d", r);
