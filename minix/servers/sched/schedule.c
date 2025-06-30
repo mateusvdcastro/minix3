@@ -22,7 +22,6 @@ static unsigned balance_timeout;
 
 static int schedule_process(struct schedproc * rmp, unsigned flags);
 
-#define SCHEDULE_CHANGE_PRIO	0x1
 #define SCHEDULE_CHANGE_QUANTUM	0x2
 #define SCHEDULE_CHANGE_CPU	0x4
 
@@ -32,8 +31,6 @@ static int schedule_process(struct schedproc * rmp, unsigned flags);
 		SCHEDULE_CHANGE_CPU		\
 		)
 
-#define schedule_process_local(p)	\
-	schedule_process(p, SCHEDULE_CHANGE_PRIO | SCHEDULE_CHANGE_QUANTUM)
 #define schedule_process_migrate(p)	\
 	schedule_process(p, SCHEDULE_CHANGE_CPU)
 
@@ -140,7 +137,7 @@ int is_queue_empty(void) {
  *				do_noquantum				     *
  *===========================================================================*/
 
-int do_schedule_next(message *m_ptr)
+static int do_schedule_next(message *m_ptr)
 {
 	int next_proc = peek_queue();  // Pega o próximo (sem remover)
 
@@ -290,10 +287,5 @@ static int schedule_process(struct schedproc * rmp, unsigned flags)
  *===========================================================================*/
 void init_scheduling(void)
 {
-	int r;
 
-	balance_timeout = BALANCE_TIMEOUT * sys_hz();
-
-	if ((r = sys_setalarm(balance_timeout, 0)) != OK)
-		panic("sys_setalarm failed: %d", r);
 }
