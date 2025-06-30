@@ -41,19 +41,6 @@ int main(void)
 		who_e = m_in.m_source;	/* who sent the message */
 		call_nr = m_in.m_type;	/* system call number */
 
-		/* Check for system notifications first. Special cases. */
-		if (is_ipc_notify(ipc_status)) {
-			switch(who_e) {
-			case CLOCK:
-				balance_queues();
-				break;
-			default :
-				break;
-			}
-
-			continue; /* Don't reply. */
-		}
-
 		switch(call_nr) {
 		case SCHEDULING_INHERIT:
 		case SCHEDULING_START:
@@ -61,26 +48,6 @@ int main(void)
 			break;
 		case SCHEDULING_STOP:
 			result = do_stop_scheduling(&m_in);
-			break;
-		case SCHEDULING_SET_NICE:
-			result = do_nice(&m_in);
-			break;
-		case SCHEDULING_NO_QUANTUM:
-			/* This message was sent from the kernel, don't reply */
-			if (IPC_STATUS_FLAGS_TEST(ipc_status,
-				IPC_FLG_MSG_FROM_KERNEL)) {
-				if ((rv = do_noquantum(&m_in)) != (OK)) {
-					printf("SCHED: Warning, do_noquantum "
-						"failed with %d\n", rv);
-				}
-				continue; /* Don't reply */
-			}
-			else {
-				printf("SCHED: process %d faked "
-					"SCHEDULING_NO_QUANTUM message!\n",
-						who_e);
-				result = EPERM;
-			}
 			break;
 		default:
 			result = no_sys(who_e, call_nr);
