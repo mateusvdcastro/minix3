@@ -158,13 +158,39 @@ int do_stop_scheduling(message *m_ptr)
 		return EBADEPT;
 	}
 
-	rmp = &schedproc[proc_nr_n];
-#ifdef CONFIG_SMP
-	cpu_proc[rmp->cpu]--;
-#endif
-	rmp->flags = 0; /*&= ~IN_USE;*/
+	rmp = &schedproc[proc_nr];
+
+	// Marca como fora de uso
+	rmp->flags = 0;
+
+	// Remove da fila, se ele estiver nela
+	remove_from_fcfs_queue(proc_nr);
+
+	// Agenda o próximo processo
+	int next = peek_queue();
+	if (next != -1) {
+		return schedule_process(&schedproc[next], SCHEDULE_CHANGE_ALL);
+	}
 
 	return OK;
+}
+
+/*===========================================================================*
+ *				remove_from_fcfs_queue			     *
+ *===========================================================================*/
+
+void remove_from_fcfs_queue(int proc_nr)
+{
+	int i;
+	for (i = ready_front; i < ready_back; ++i) {
+		if (ready_queue[i] == proc_nr) {
+			// Desloca todos os próximos
+			for (int j = i; j < ready_back - 1; ++j)
+				ready_queue[j] = ready_queue[j + 1];
+			ready_back--;
+			break;
+		}
+	}
 }
 
 /*===========================================================================*
