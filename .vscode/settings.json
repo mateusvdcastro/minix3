@@ -1,6 +1,8 @@
 {
     "files.associations": {
         "sched.h": "c",
-        "sysutil.h": "c"
+        "sysutil.h": "c",
+        "future": "c",
+        "system_error": "c"
     }
 }
