@@ -50,3 +50,11 @@ external/bsd/llvm/dist/llvm/test/Verifier/bitcast-address-space-through-constant
 lib/libc/compat__*
 .gdbinit
 /external
+/minix/servers/is
+/minix/servers/mib
+/releasetools
+/minix/servers/ds
+/minix/servers/ipc
+/minix/usr.sbin/mkfs.mfs
+/minix/usr.sbin
+/releasetools
